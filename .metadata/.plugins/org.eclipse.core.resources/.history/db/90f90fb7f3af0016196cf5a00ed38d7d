@@ -1,0 +1,451 @@
+var deg2rad = Math.PI / 180;
+
+function XMLscene(myInterface) {
+    CGFscene.call(this);
+    this.myInterface = myInterface;
+}
+
+XMLscene.prototype = Object.create(CGFscene.prototype);
+XMLscene.prototype.constructor = XMLscene;
+
+XMLscene.prototype.init = function (application) {
+    CGFscene.prototype.init.call(this, application);
+
+    this.initCameras();
+
+    this.gl.clearColor(0.0, 0.0, 0.0, 1.0);
+
+    this.gl.clearDepth(100.0);
+    this.gl.enable(this.gl.DEPTH_TEST);
+	this.gl.enable(this.gl.CULL_FACE);
+    this.gl.depthFunc(this.gl.LEQUAL);
+    
+    this.persps = [];
+    this.textures = [];
+    this.materials = [];
+    this.primitives = [];
+    this.anims = [];
+    this.objects = [];
+    
+    var idx=0;
+    this.material_count=0;
+    this.persp_count=0;
+    this.laux = [];
+    
+    this.currTime = new Date().getTime();
+    this.setUpdatePeriod(10);
+    
+	this.axis = new CGFaxis(this);
+};
+
+
+XMLscene.prototype.initCameras = function () {
+    this.camera = new CGFcamera(0.4, 0.1, 400, vec3.fromValues(110, 55, 110), vec3.fromValues(-10, 0, -10));
+};
+
+/**
+ * Sets the default scene appearance based on an material named "default"
+ * if it is present in the .dsx scene file
+ */
+XMLscene.prototype.setDefaultAppearance = function () {
+	this.setAmbient(0.2, 0.4, 0.8, 1.0);
+    this.setDiffuse(0.2, 0.4, 0.8, 1.0);
+    this.setSpecular(0.2, 0.4, 0.8, 1.0);
+    this.setShininess(10.0);
+};
+
+
+/**
+* Function called by a {XMLParser} once it is done parsing
+* a scene in .dsx format
+*/
+XMLscene.prototype.onGraphLoaded = function () 
+{
+	this.axis = new CGFaxis(this, this.graph.scene_axis);
+    
+	//Illumination
+	this.gl.clearColor(this.graph.illumination.background.r,this.graph.illumination.background.g,this.graph.illumination.background.b,this.graph.illumination.background.a);
+	this.setGlobalAmbientLight(this.graph.illumination.ambient.r,this.graph.illumination.ambient.g,this.graph.illumination.ambient.b,this.graph.illumination.ambient.a);
+	
+	//Perspectives
+	this.initPerspectives();
+	//this.updatePerspective();
+    
+	/*
+     * Lights
+     */
+    this.initLights();
+    
+    /*
+     * Textures
+     */
+    if(this.graph.textures.length > 0)
+    	this.enableTextures(true);
+    
+    var text = this.graph.textures;
+    for (var i = 0 ; i < text.length ; i++) {
+    	var aux = new SceneTexture(this, text[i].id, text[i].file, text[i].lengths, text[i].lengtht);
+    	
+    	this.textures.push(aux);
+    }
+    
+    /*
+     * Materials
+     */
+    var mat = this.graph.materials;
+    for ( i = 0 ; i < mat.length ; i++) {
+    	aux = new SceneMaterial(this, mat[i].id);
+    	aux.setAmbient(mat[i].ambient.r, mat[i].ambient.g, mat[i].ambient.b, mat[i].ambient.a);
+    	aux.setDiffuse(mat[i].diffuse.r, mat[i].diffuse.g, mat[i].diffuse.b, mat[i].diffuse.a);
+    	aux.setSpecular(mat[i].specular.r, mat[i].specular.g, mat[i].specular.b, mat[i].specular.a);
+    	aux.setEmission(mat[i].emission.r, mat[i].emission.g, mat[i].emission.b, mat[i].emission.a);
+    	aux.setShininess(mat[i].shininess);
+    	
+    	this.materials.push(aux);
+    }
+    
+    //Primitives
+    this.initPrimitives();
+    
+    //Animations
+    var anims = this.graph.anims;
+    for (i = 0; i < anims.length; ++i) {
+        switch (anims[i].type) {
+            case "linear":
+                this.anims.push(new LinearAnimation(anims[i].id, anims[i].span, anims[i].args));
+                break;
+            case "circular":
+                this.anims.push(new CircularAnimation(anims[i].id, anims[i].span,
+                    anims[i].args["centerx"], anims[i].args["centery"], anims[i].args["centerz"],
+                    anims[i].args["radius"],
+                    deg2rad * anims[i].args["startang"],
+                    deg2rad * anims[i].args["rotang"]));
+                break;
+        }
+    }
+    
+    // Components
+    this.initComponents();
+    
+    
+    this.graph.loadedOk = true;
+};
+
+XMLscene.prototype.display = function () {
+	
+	// Clear image and depth buffer everytime we update the scene
+    this.gl.viewport(0, 0, this.gl.canvas.width, this.gl.canvas.height);
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
+
+	// Initialize Model-View matrix as identity (no transformation
+	this.updateProjectionMatrix();
+    this.loadIdentity();
+
+	// Apply transformations corresponding to the camera position relative to the origin
+	this.applyViewMatrix();
+		
+	
+	if (this.graph.loadedOk)
+	{	
+		this.axis.display();
+		this.setDefaultAppearance();
+		
+		//this.updatePerspective();
+		this.updateLights();
+		
+		// Draw Objects to scene (nodes with leaves)
+        for (i = 0; i < this.objects.length; i++) {
+            var obj = this.objects[i];
+            obj.draw(this);
+        }
+        
+	};
+	
+};
+
+
+// ------------------------------------------------------------
+
+/**
+ * Lights, Materials and Perspectives update
+ */
+
+XMLscene.prototype.updatePerspective = function () {
+    this.camera = this.persps[this.persp_count];
+    this.interface.setActiveCamera(this.persps[this.persp_count]);
+
+    this.persp_count = (++this.persp_count) % this.persps.length;
+};
+
+XMLscene.prototype.updateMaterial = function () {
+};
+
+
+XMLscene.prototype.updateLights = function () {
+	
+	for (var i = 0 ; i < this.laux.length ; i++) {
+		if (this.laux[i] == true)
+			this.lights[i].enable();
+		else
+			this.lights[i].disable();
+		
+		this.lights[i].update();
+	}
+};
+
+/**
+ * Initialize perspectives
+ */
+
+XMLscene.prototype.initPerspectives = function () {
+	var persp = this.graph.perspectives;
+	
+	for ( var i = 0 ; i < persp.length ; i++) {
+		this.persps.push(new CGFcamera( (persp[i].angle * this.deg2rad), persp[i].near, persp[i].far, vec3.fromValues(persp[i].from.x, persp[i].from.y, persp[i].from.z), vec3.fromValues(persp[i].to.x, persp[i].to.y, persp[i].to.z)));
+	}
+};
+
+/**
+ * Initialize lights
+ */
+
+XMLscene.prototype.initLights = function () {	
+	var lix = 0;
+	var bul = false;
+	
+	for (var i = 0; i < this.graph.omnis.length; i++, lix++) {
+        var o = this.graph.omnis[i];
+
+        this.lights[lix].setPosition(o.location.x, o.location.y, o.location.z, o.location.w);
+        this.lights[lix].setAmbient(o.ambient.r, o.ambient.g, o.ambient.b, o.ambient.a);
+        this.lights[lix].setDiffuse(o.diffuse.r, o.diffuse.g, o.diffuse.b, o.diffuse.a);
+        this.lights[lix].setSpecular(o.specular.r, o.specular.g, o.specular.b, o.specular.a);
+        
+        
+        if(o.enabled) {
+        	this.lights[lix].enable();
+        	bul = true;
+        }
+        else {
+        	this.lights[lix].disable();
+        	bul = false;
+        }
+        
+        this.lights[lix].setVisible(true);
+        this.lights[lix].update();
+        
+        this.laux.push(bul);
+        this.myInterface.addLight(lix,o.id);
+    }
+	
+	for (var j = 0; j < this.graph.spots.length; j++, lix++) {
+        var spt = this.graph.spots[j];       
+        
+        this.lights[2].setPosition(spt.location.x, spt.location.y, spt.location.z, 1);
+        this.lights[2].setAmbient(spt.ambient.r, spt.ambient.g, spt.ambient.b, spt.ambient.a);
+        this.lights[2].setDiffuse(spt.diffuse.r, spt.diffuse.g, spt.diffuse.b, spt.diffuse.a);
+        this.lights[2].setSpecular(spt.specular.r, spt.specular.g, spt.specular.b, spt.specular.a);
+        this.lights[2].setSpotDirection(spt.direction.x, spt.direction.y, spt.direction.z);
+        this.lights[2].setSpotExponent(spt.exponent);
+        //this.lights[2].setSpotCutOff(spt.angle);
+
+        
+        if(spt.enabled) {
+          	this.lights[lix].enable();
+          	bul = true;
+        }
+        else {
+           	this.lights[lix].disable();
+           	bul = false;
+        }
+        
+        this.lights[lix].setVisible(true);
+        this.lights[lix].update();
+        
+        this.laux.push(bul);
+        this.myInterface.addLight(lix,spt.id);
+    }
+	
+	//console.log(this.lights);
+	
+};
+
+
+/**
+ * Adds primitives
+ */
+XMLscene.prototype.initPrimitives = function() {
+	
+	for( var i = 0; i < this.graph.primitives.length; i++) {
+		var primitive = this.graph.primitives[i];
+		switch(primitive.type) {
+		case "rectangle":
+			var obj = new MyQuad(this, primitive.args);
+			obj.id = primitive.id;
+			this.primitives.push(obj);
+			break;
+		case "triangle":
+			var obj = new MyTriangle(this, primitive.args);
+			obj.id = primitive.id;
+			this.primitives.push(obj);
+			break;
+		case "cylinder":
+			var obj = new MyFullCylinder(this, primitive.args);
+			obj.id = primitive.id;
+			this.primitives.push(obj);
+			break;
+		case "sphere":
+			var obj = new MySphere(this, primitive.args);
+			obj.id = primitive.id;
+			this.primitives.push(obj);
+			break; 
+		case "torus":
+			var obj = new MyTorus(this, primitive.args);
+			obj.id = primitive.id;
+			this.primitives.push(obj);
+			break;
+		case "plane":
+			var obj = new MyPlane(this, primitive.args);
+			obj.id = primitive.id;
+			this.primitives.push(obj);
+			break;
+		case "patch":
+			var obj = new MyPatch(this, primitive.args);
+			obj.id = primitive.id;
+			this.primitives.push(obj);
+			break;
+		case "vehicle":
+			var obj = new MyVehicle(this);
+			obj.id = primitive.id;
+			this.primitives.push(obj);
+			break;
+		case "chessboard":
+			var obj = new ChessBoard(this, primitive.args);
+			obj.id = primitive.id;
+			this.primitives.push(obj);
+			break;
+		}
+	}
+};
+
+/**
+ * Finds node root and goes to the Depth First Search algorithm
+ */
+XMLscene.prototype.initComponents = function() {
+    var components_list = this.graph.components;
+    
+    var root_node = this.graph.findComponent(this.graph.scene_root);
+
+    this.DFS(root_node, root_node.materials , root_node.texture, root_node.matrix, root_node.anims);
+};
+
+
+/**
+ * DFS algorithm, finds the next node
+ */
+
+XMLscene.prototype.DFS = function(component, currMaterial, currTexture, currMatrix, currAnims) {
+	var nextMat = component.materials;
+	if(component.materials == null)
+		nextMat = currMaterial;
+	for(var j = 0 ; j < component.materials.length ; j++ ) {
+		if (component.materials[j] == "inherit") 
+		nextMat = currMaterial;
+	}
+	
+    var nextTex = component.texture;
+    if (component.texture == "inherit") 
+    	nextTex = currTexture;
+    else if (component.texture == "none") 
+    	nexTex = null;
+	
+
+    var nextMatrix = mat4.create();
+    mat4.multiply(nextMatrix, currMatrix, component.matrix);
+    
+    var nextAnims = currAnims.concat(component.anims);
+
+    for (var i = 0; i < component.relat.length; i++) {
+        var nextcomponent = this.graph.findComponent(component.relat[i]);
+
+        if (nextcomponent == null) {
+        	var aux = new SceneObject(component.relat[i]);
+            aux.materials = this.getMaterial(nextMat);
+            aux.texture = this.getTexture(nextTex);
+            
+	        for (var k = 0; k < nextAnims.length; ++k) {
+	        	var anim = this.getAnim(nextAnims[k]).clone();
+	            aux.anims.push(anim);
+	        }
+            
+            aux.matrix = nextMatrix;
+            aux.isSon = true;
+            for (var j = 0; j < this.primitives.length; j++) {
+                if (this.primitives[j].id == aux.id) {
+                    aux.primitive = this.primitives[j];
+                    break;
+                }
+            }
+            this.objects.push(aux);
+            continue;
+        }
+
+        this.DFS(nextcomponent, nextMat, nextTex, nextMatrix, nextAnims);
+    }
+};
+
+/**
+ * @returns {Anim} with the {string} id specified
+ */
+XMLscene.prototype.getAnim = function(id) {
+    if (id == null) 
+    	return null;
+
+    for (var i = 0; i < this.anims.length; ++i)
+        if (id == this.anims[i].id) 
+        	return this.anims[i];
+
+    return null;
+};
+
+/**
+ * @returns {SceneMaterial} with the {list} ids specified 
+ */
+XMLscene.prototype.getMaterial = function(list) {
+    if (list == null) 
+    	return null;
+    
+    this.aux = [];
+    
+    for (var i = 0; i < this.materials.length; i++) {
+        for ( var j = 0 ; j < list.length ; j++) {
+        	if(list[j] == this.materials[i].id)
+        		this.aux.push(this.materials[i])
+        }
+    }
+
+    return this.aux;
+};
+
+/**
+ * @returns {SceneTexture} with the {string} id specified
+ */
+XMLscene.prototype.getTexture = function(id) {
+    if (id == null) 
+    	return null;
+
+    for (var i = 0; i < this.textures.length; i++)
+        if (id == this.textures[i].id) 
+        	return this.textures[i];
+
+    return null;
+};
+
+
+XMLscene.prototype.update = function(currTime) {
+    var delta = currTime - this.currTime;
+    this.currTime = currTime;
+
+    for (var i = 0; i < this.objects.length; ++i)
+        this.objects[i].updateAnims(delta);
+};
